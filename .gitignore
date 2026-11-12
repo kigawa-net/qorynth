@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+vendor/
+target/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.so
+*.a
+*.dylib
+
+# Logs
+*.log
+
+# Secrets (just in case)
+*.key
+*.pem
+*.p12
+*.pfx
