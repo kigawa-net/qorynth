@@ -104,6 +104,10 @@ OpenBao → qorynth-seal → [P2P] → qorynth-node A
                     クラスター ACTIVE
 ```
 
+**承認経路は Signaling 経由である (p2p-transport.md と整合)**。承認端末は Signal の承認端末向け口（HTTPS/WSS）へ承認を送り、Signal は転送のみを行う（成否判定はせず、承認証明書はノードが検証する）。
+
+**未解決事項 (p2p-transport.md と整合):** 「Signaling 全停止 + クラスタ全台再起動」の場合、承認の経路が失われ、承認が Signaling 経由のままでは**有効化不能**になる。対処案は、承認をノード直結の口でも受けられるようにすること（フェーズ3で確定。p2p-transport.md §3.6・§6.4・§8 参照）。
+
 ### 2.3 ノード再参加フロー（未確定）
 
 ```
@@ -122,7 +126,13 @@ LOCKED状態になるか？ → ACTIVE維持か？
 | qorynth-node ↔ qorynth-seal | QUIC | TLS 1.3 | mTLS |
 | qorynth-seal ↔ OpenBao | HTTP/2 | TLS 1.3 | — |
 | 承認端末 ↔ Signal | HTTPS/WSS | TLS 1.3 | WebAuthn/Passkey |
-| Signal ↔ Signal | 要設計 | TLS 1.3 | — |
+| Signal ↔ Signal | QUIC（ALPN `qorynth-signal-sync/1`、署名つきレコードの同期）(p2p-transport.md と整合) | TLS 1.3 | mTLS |
+
+**Signal 構成 (p2p-transport.md と整合):**
+
+- 3台の対等レプリカ構成。リーダーなしで **Raft は採用しない**（起動時の循環依存の回避と、1台でも動作可能な可用性のため）。クライアントは全 Signal に接続して登録し、Signal 間は署名つき LWW（`seq` 比較）で収束させる。
+- 1台停止しても、残りの Signal で接続確立（登録・仲介）を継続できる。
+- 接続先共有情報は永続化し、再起動後も継続する。ノードは last-known-good アドレス・Raft 既知 Peer アドレス・自身の `seq` をローカルに永続化し、Signal は Peer レコードを任意のローカル永続キャッシュ（ウォームスタート用）として保持する。
 
 ## 4. 既知の設計課題
 

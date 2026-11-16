@@ -421,7 +421,18 @@ OpenBao ──(Unwrap要求: key_id, 暗号文 (R, ct), purpose)──► qorynt
 | 1 台 | バックアップ不要。残り 2 台から Resharing で新ノードに Share を再発行（§4.3） |
 | 2 台 | 残る 1 台 + バックアップの Share を 1 つ復旧して配布者 2 台を確保 → Resharing で 3 台に戻す |
 | 3 台 | バックアップの Share を 2 つ復旧（2 名の復旧管理者が必要）→ 新ノードへ Resharing。復旧中に `d` を再構成する手順は避け、Share を新ノードへ直接ロードして VSR を行う |
-| バックアップも 2 つ以上喪失 | `d` は復元不能。新規 DKG で新しい `key_version` を作る。OpenBao は旧 root key を復号できないため、**OpenBao 側のリカバリー（recovery key / 再初期化）に依存する**ことを運用手順に明記 |
+| バックアップも 2 つ以上喪失 | `d` は復元不能。新規 DKG で新しい `key_version` を作る。OpenBao は旧 root key を復号できないため、**既存の OpenBao データは復号不能になり得る**。recovery key は Unseal 用の鍵ではなく、root key を復元できる保証がないため、**復元できない前提**で運用する（下記「recovery key 復旧不能時の運用設計」）(openbao-integration.md と整合) |
+
+#### recovery key 復旧不能時の運用設計 (openbao-integration.md と整合)
+
+recovery key（Auto-Unseal 移行後の旧 unseal key 相当）は **Unseal には使えず**、root token 再生成・rekey・Seal migration などの管理操作の認可に使うものである。root key を復元できる保証はなく【要確認: 版ごとの挙動。openbao-integration.md §3.5・§6】、失効・破損・紛失した場合も同様である。したがって「`d` と Share バックアップを失っても recovery key で救える」とは**想定しない**。
+
+| 項目 | 方針 |
+|---|---|
+| recovery key のバックアップ | OpenBao 運用者が、Qorynth ノードおよび Qorynth の復旧管理者・承認端末保有者とは**別の管理者・別のオフライン媒体**に分割保管する（1 人が両方を持たない）。Share バックアップ・Raft スナップショットとも別の場所・別の保管者にする。切替後は rekey で旧 Part（旧 recovery key）を無効化し、新 recovery key を保管する |
+| recovery key 失効・破損時の影響範囲 | 失われるのは管理操作（root token 再生成・rekey・Seal migration）の認可手段。**通常の自動 Unseal と稼働中のデータ参照は影響を受けない**（Unseal は Qorynth が担う）。ただし **`d` と Share バックアップも同時に失った場合は root key を復元できず、既存データは復号不能になり得る** |
+| データ復旧の代替手段 | recovery key に依存しない経路を用意する。(1) Qorynth の Share バックアップを最重要資産として扱い、ステージングで定期的に復旧演習（2 つの Share 復旧 → Resharing → OpenBao の Unseal）を行う。(2) OpenBao のシークレットの正本（IaC・外部の暗号化バックアップ）を別途管理し、再初期化した OpenBao へ**再投入できる**ようにする。(3) Raft スナップショットは Qorynth のバックアップとは別保管とするが、復旧には両方が必要である点を手順に明記する |
+| 復旧不能が確定した場合 | 新規 DKG（新 `key_version`）と OpenBao の再初期化を行い、(2) の正本からシークレットを再投入する。旧データの復号は断念する前提で、失われ得るシークレットの範囲を事前に棚卸ししておく |
 
 ### 4.5 全台再起動: LOCKED 移行、再承認、Share の再同期
 
