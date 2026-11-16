@@ -7,7 +7,7 @@
 本書は、architecture.md §5 と development-plan.md で「フェーズ1前に決定」とされている **実装言語** を選定する。実装コードは含まない。認証情報・秘密値も含まない。
 
 > **裏取りの状況（重要）**
-> 執筆環境では Web 検索を利用できなかった（権限未付与）。ライブラリの最新版・メンテナンス状況・機能サポートは執筆時点の知識に基づくため、**バージョン番号・サポート有無の断定には【要確認】を付けた**。フェーズ1冒頭のスパイク（§7）で一括して確認する。「チームの既存知見」も、リポジトリ上のワークスペース（Kotlin 製プロジェクトが多い）からの推測であり【要確認】。
+> 2026-11-17 に、今回確認対象とした Rust クレートの存在・非 yanked 状態、維持状況と主要 API・機能を crates.io API と docs.rs で裏取り済み。**具体的な版番号は記載せず、維持状況・既知の問題・制約のみ記載する**。確認できた差し込み口や機能の実環境での動作・性能・配布要件への適合は、フェーズ1冒頭のスパイク（§7）で検証する。iroh 自体と Go / Kotlin 側の未確認事項は今回の裏取り対象外。「チームの既存知見」も、リポジトリ上のワークスペース（Kotlin 製プロジェクトが多い）からの推測であり【要確認】。
 
 ---
 
@@ -72,15 +72,15 @@
 
 | 観点 | 評価 |
 |---|---|
-| QUIC / mTLS | **quinn**（+ **rustls**）。`rustls` の `ServerCertVerifier` / `ClientCertVerifier` / `SigningKey` トレイトを実装することで「クラスタ CA + Raft メンバーシップ照合」（T2）と「TPM 委譲署名」（T4）を型安全に差し込める。ALPN、0-RTT 無効（`enable_early_data` を使わない）を明示制御可能。`AsyncUdpSocket` を差し替えれば hole punching 用のソケット共有も可能【要確認：現行の API 名・安定度】。参考実装として iroh（quinn ベースの P2P。hole punching 実装あり）があるが、依存はせず設計参考にとどめる【要確認】。代替に **s2n-quic**（AWS）、**quiche**（Cloudflare） |
-| 暗号（閾値・VSS・HPKE） | **RustCrypto**: `p256`（定数時間群・スカラー演算）、`elliptic-curve`、`sha2`、`hkdf`、`aead`。HPKE は `hpke`（rozbb、RFC 9180）が複数の KEM/KDF/AEAD をサポート【要確認：P-256 KEM・版】。FROST は **ZcashFoundation `frost-p256` / `frost-ed25519`**（RFC 9591 対応、監査実績あり）【要確認】。Shamir/Feldman VSS は `vsss-rs` が候補【要確認】。GJKR・VSR は**自前実装**（Go と同じ） |
+| QUIC / mTLS | **quinn**（+ **rustls**）。`rustls` の `ServerCertVerifier` / `ClientCertVerifier` / `Signer` トレイトを実装することで「クラスタ CA + Raft メンバーシップ照合」（T2）と「TPM 委譲署名」（T4）を型安全に差し込める。ALPN、0-RTT 無効（`enable_early_data` を使わない）を明示制御可能。`AsyncUdpSocket` トレイトと `Transmit` が公開されており、カスタムソケットを差し込んで hole punching 用のソケット共有を自前実装できる。quinn / rustls は活発に保守されている。iroh は参考実装の候補として言及するのみで依存しない。iroh 自体の機能・維持状況は未裏取り【要確認】。代替に **s2n-quic**（AWS）、**quiche**（Cloudflare） |
+| 暗号（閾値・VSS・HPKE） | **RustCrypto**: `p256`（定数時間群・スカラー演算）、`elliptic-curve`、`sha2`、`hkdf`、`aead`。HPKE は `hpke`（rozbb/rust-hpke、RFC 9180、純 Rust）が DHKEM(P-256, HKDF-SHA256) を実装済み（feature `nistp`、MSRV 制約あり）。FROST は **ZcashFoundation `frost-p256` / `frost-ed25519`**（RFC 9591 対応、非 yanked 確認済み）。`p256` と Shamir/Feldman VSS の採用候補 `vsss-rs` は活発に保守されている。`vsss-rs` が必要な形を提供するかはフェーズ1で確認する。GJKR・VSR は**自前実装**（Go と同じ） |
 | メモリ消去 | **強い**。GC なし。`zeroize` / `secrecy` / `subtle`（定数時間比較）で Share・部分復号値をスコープ終了時にゼロ化。`mlock`（`memsec`/`region` 等）や core dump 抑止も OS レベルで素直に扱える。T6 で最大の強み |
-| TPM | **tss-esapi**（Parallaxsecond / rust-tpm。TSS2 ESAPI の安全ラッパ）。実体は C ライブラリ `libtss2` へのリンクが必要（動的/静的リンクの管理が増える）【要確認：版・静的ビルド可否】。純 Rust の TPM コマンドクレートは未成熟。`TPM2_Sign` を `rustls::sign::SigningKey` に包むラッパを自作する（約 100 行規模の薄い層）。代替に PKCS#11 経由の `cryptoki` + `tpm2-pkcs11` |
+| TPM | **tss-esapi**（parallaxsecond/rust-tss-esapi。TSS2 ESAPI の安全ラッパ）。`tss-esapi-sys` の `bundled` + `generate-bindings` feature で tpm2-tss をソースから同梱ビルドし、静的リンクできるため、システムの `libtss2` は必須ではない。`TPM2_TSS_SOURCE_PATH` でローカルソースも指定可能。`TPM2_Sign` を `rustls::sign::Signer`（`sign(&self, msg)` / `scheme()`、dyn compatible）に包むラッパを自作する。rustls の `CryptoProvider` 拡張機構と合わせて TPM 非エクスポート鍵の委譲署名を差し込める。代替に PKCS#11 経由の `cryptoki` + `tpm2-pkcs11` |
 | OpenBao 連携 | HTTP サーバに **axum**（hyper + rustls、HTTP/2、TLS 1.3）。Transit 互換 API のサブセット（encrypt/decrypt）の JSON を `serde` で型定義。OpenBao 本体は統合テストで外部プロセス/コンテナとして起動 |
-| K8s 運用 | `musl` 静的ビルド + distroless / scratch で小イメージ。ただし `libtss2` 依存のため `qorynth-node` は glibc 動的リンク + 最小ベースが現実的な可能性【要確認】。`kube`（kube-rs）は必要になった場合のみ。コンパイル時間は長い（CI キャッシュ要） |
+| K8s 運用 | `musl` 静的ビルド + distroless / scratch で小イメージ。`qorynth-node` も `bundled` feature で tpm2-tss を同梱ビルド可能（要検証）。対象環境での静的リンク・配布成立性はスパイクで確認する。`kube`（kube-rs）は必要になった場合のみ。コンパイル時間は長い（CI キャッシュ要） |
 | テスト基盤 | `cargo test` / `nextest`、プロパティテスト `proptest`、fuzz `cargo-fuzz`、決定論的シミュレーション `turmoil`（Tokio 上のネットワーク分断・遅延）、`testcontainers`（OpenBao コンテナ）、TPM は `swtpm`（ソフトウェア TPM）。Raft の決定論テストが書きやすい |
-| Raft | **openraft**（非同期。API が進化中で版固定が必須）【要確認：安定版到達状況】。代替に `raft-rs`（TiKV。ステートマシン側の実装量が多い） |
-| WebAuthn | **webauthn-rs**（Passkey 対応。実績あり）【要確認】 |
+| Raft | **openraft**（databendlabs、非同期。活発に保守されている。API の進化に備えマイナー固定）。代替に `raft-rs`（TiKV。ステートマシン側の実装量が多い） |
+| WebAuthn | **webauthn**（kanidm 製、GitHub リポジトリ名は `webauthn-rs`。Passkey 対応、更新継続・非 yanked 確認済み） |
 | エコシステム・採用実績 | 暗号基盤・セキュリティ製品で採用拡大（rustls、AWS、Cloudflare 等）。KMS/シークレット管理では Go 製が多数派 |
 | 学習コスト・チーム知見 | **高い**（所有権、async/Tokio）。ワークスペース上に Rust 資産は見当たらず【要確認】。一方、Kotlin 経験者は型システム面で親和性があるとされる |
 
@@ -110,14 +110,14 @@
 |---|---|---|---|
 | QUIC 実装の成熟度（T1） | ◎ quic-go | ◎ quinn / s2n-quic / quiche | △ Netty QUIC（incubator）/ Kwik |
 | 証明書検証フック（T2） | ◎ `VerifyPeerCertificate` | ◎ rustls verifier トレイト | ○ `X509TrustManager` |
-| hole punching 用ソケット共有（T3） | ○ `Transport` に `PacketConn` | ○ `AsyncUdpSocket`【要確認】 | △ |
-| TPM 非エクスポート鍵での TLS 署名（T4） | ◎ `crypto.Signer` + go-tpm（純 Go） | ○ tss-esapi + 自作 `SigningKey`（C 依存） | △ JNI/PKCS#11 |
+| hole punching 用ソケット共有（T3） | ○ `Transport` に `PacketConn` | ○ `AsyncUdpSocket` / `Transmit`（公開 API 確認済み） | △ |
+| TPM 非エクスポート鍵での TLS 署名（T4） | ◎ `crypto.Signer` + go-tpm（純 Go） | ○ tss-esapi + 自作 `Signer`（C 依存） | △ JNI/PKCS#11 |
 | 閾値暗号・HPKE の既存資産（T5） | ○ circl（HPKE/FROST）。VSS/GJKR/VSR は自前 | ◎ RustCrypto / frost-p256 / vsss-rs。GJKR/VSR は自前 | △ BC のみ。ほぼ自前 |
 | 鍵素材のメモリ消去（T6） | △ GC により保証不可 | ◎ zeroize / secrecy / mlock | ✕〜△ |
-| Raft（T7） | ◎ hashicorp/raft | ○ openraft（API 変動）【要確認】 | ○ Ratis |
+| Raft（T7） | ◎ hashicorp/raft | ○ openraft（活発、API 変動に備えマイナー固定） | ○ Ratis |
 | OpenBao 連携・同言語の参照性（T8） | ◎ 同一言語 | ○ HTTP 経由のみ | ○ HTTP 経由のみ |
-| WebAuthn（T9） | ◎ go-webauthn | ○ webauthn-rs | ◎ webauthn4j |
-| K8s/VM デプロイ（T10） | ◎ 静的バイナリ・小イメージ | ○ 静的バイナリ（libtss2 依存に注意） | △ JVM / native-image |
+| WebAuthn（T9） | ◎ go-webauthn | ○ webauthn | ◎ webauthn4j |
+| K8s/VM デプロイ（T10） | ◎ 静的バイナリ・小イメージ | ○ 静的バイナリ（tpm2-tss 同梱ビルド可能、要検証） | △ JVM / native-image |
 | 単体・E2E テスト性（T11） | ○ testcontainers, fuzz, `-race` | ◎ proptest, turmoil, swtpm, nextest | ○ JUnit/Kotest。QUIC/TPM テストは弱 |
 | 学習コスト・チーム知見（T12）【要確認】 | ○ 低〜中 | △ 高 | ◎ 既存知見が最大 |
 | **総合** | **次点** | **推奨** | 不採用 |
@@ -131,16 +131,16 @@
 ### 5.1 決定根拠
 
 1. **鍵素材のメモリ衛生（T6）が本システムの存在意義に直結する。** threshold-crypto.md は「1 ノードの実行時侵害でも `d` が漏れない」ことを強い要求としている。Share・部分復号値・root key 平文を確実にゼロ化できるのは Rust のみ。Go・JVM は GC 管理下のコピーを完全には消せず、設計上の防御（再構成しない分散復号）を実装レベルで弱める。
-2. **TLS の差し込みポイントが要件と一致する（T2・T4）。** rustls の verifier / `SigningKey` トレイトにより、「証明書検証 = クラスタ CA + Raft メンバーシップ照合」と「署名 = TPM」を TLS スタックの内側に型安全に実装できる。メンバーシップ照合を通らない証明書でハンドシェイクが完了しない構造にでき、p2p-transport.md の R3（Signaling を信頼しない相互認証）と整合する。
+2. **TLS の差し込みポイントが要件と一致する（T2・T4）。** rustls の verifier / `Signer` トレイトにより、「証明書検証 = クラスタ CA + Raft メンバーシップ照合」と「署名 = TPM」を TLS スタックの内側に型安全に実装できる。メンバーシップ照合を通らない証明書でハンドシェイクが完了しない構造にでき、p2p-transport.md の R3（Signaling を信頼しない相互認証）と整合する。
 3. **閾値暗号の実装資産（T5）。** P-256 の定数時間演算（RustCrypto）、FROST（ZF の RFC 9591 実装）、Feldman/Shamir の候補（vsss-rs）、HPKE がある。Go も circl で近いが、メモリ消去（1）で劣後する。Kotlin は資産が乏しい。ただし GJKR New-DKG と VSR は**どの言語でも自前実装**であり、監査対象となるコード量は言語によらない。
-4. **単一静的バイナリ（T10）。** JVM のような実行環境依存がなく、攻撃面と起動時依存が小さい。TPM 用の `libtss2` のみ native 依存として管理する。
+4. **単一静的バイナリ（T10）。** JVM のような実行環境依存がなく、攻撃面と起動時依存が小さい。TPM 用の tpm2-tss は native 依存として同梱ビルド可能であり、対象環境での静的リンク・配布はスパイクで検証する。
 5. **テスト性（T11）。** `turmoil` による決定論的なネットワーク分断・遅延の再現、`proptest` による Share・クォーラム条件のプロパティテスト、`swtpm` による TPM 自動テストが、フェーズごとの検証項目（「不正ノードが参加できない」「1 台では復号できない」等）と噛み合う。
 
 ### 5.2 Go を選ばなかった理由（次点との差）
 
 Go は運用性（K8s、静的バイナリ）、OpenBao と同一言語、TPM の `crypto.Signer` 連携、チームの学習コストの低さで優位であり、**最も現実的な代替案**である。それでも選ばない理由は T6（メモリ消去）が言語仕様上解決できない点にある。メモリ衛生を設計要件に掲げる KMS で、実装言語がその保証を提供できない状態は許容しない。OpenBao との連携は HTTP API で閉じており（openbao-integration.md §0）、同一言語であることの利点は仕様確認の容易さに限られる。
 
-> **覆る条件:** フェーズ1冒頭のスパイク（§7）で、Rust 側に致命的な欠落（rustls での TPM 委譲署名が実現できない、quinn で hole punching 用ソケット制御ができない、tss-esapi が配布要件を満たさない等）が見つかった場合は、Go に切り替える。その場合、メモリ消去は「秘密を扱う小さなコンポーネントを分離し、`mlock` + 明示ゼロ化 + 秘密値を持つ期間の短縮」で緩和する。
+> **覆る条件:** 欠落候補だった rustls の TPM 委譲署名、quinn の hole punching 用ソケット制御、tss-esapi の配布要件は、署名の差し込み口・カスタムソケット API・同梱ビルド機構の裏取りによりすべて解消済み。**現状では Go 切替の事由なし。ただしフェーズ1冒頭スパイク（§7）で再確認する**。実環境で致命的な要件不適合が見つかった場合は Go に切り替える。その場合、メモリ消去は「秘密を扱う小さなコンポーネントを分離し、`mlock` + 明示ゼロ化 + 秘密値を持つ期間の短縮」で緩和する。
 
 ### 5.3 Kotlin を選ばなかった理由
 
@@ -150,30 +150,30 @@ QUIC・TPM・メモリ消去の 3 要件（T1・T4・T6）が同時に弱く、�
 
 ## 6. 採用ライブラリ一覧（Rust）
 
-バージョン方針は共通して以下とする。**`Cargo.lock` をコミット、`cargo-deny`（ライセンス・脆弱性）と `cargo-vet` または `cargo-audit` を CI に組込む。暗号・TLS・QUIC クレートはマイナー版まで固定（`~x.y`）し、更新は変更履歴確認後に手動で行う。** 具体的な版番号は【要確認】とし、フェーズ1冒頭で最新の安定版を調査して固定する。
+バージョン方針は共通して以下とする。**`Cargo.lock` をコミット、`cargo-deny`（ライセンス・脆弱性）と `cargo-vet` または `cargo-audit` を CI に組込む。暗号・TLS・QUIC クレートはマイナー版まで固定（`~x.y`）し、更新は変更履歴確認後に手動で行う。** 具体的な版番号は本文に記載せず、フェーズ1冒頭で依存間の互換性・MSRV を確認して最新 stable を基本に固定する。
 
 | 領域 | ライブラリ | 用途 | バージョン方針 |
 |---|---|---|---|
 | 言語・ツールチェーン | Rust stable（MSRV を明示）、edition 2024 | 全体 | `rust-toolchain.toml` で固定。MSRV は最新 stable から 2 つ前まで【要確認】 |
-| 非同期ランタイム | `tokio` | 全体 | 1.x（LTS 系列を優先）【要確認】 |
+| 非同期ランタイム | `tokio` | 全体 | 最新 stable を基本に固定。サポート方針を採用時に確認 |
 | QUIC | `quinn` | ノード間・Seal↔ノード・Signal 間のデータ経路（T1） | マイナー固定。破壊的変更が多いため更新は手動。代替 `s2n-quic` / `quiche` は §7 スパイクで比較 |
-| TLS | `rustls`（暗号プロバイダ: `aws-lc-rs` または `ring`、FIPS が必要なら `aws-lc-rs` の FIPS 構成）、`rustls-pki-types`、`webpki` | mTLS、カスタム verifier、`SigningKey` | quinn が要求する版と揃える。プロバイダは §7 で決定【要確認】 |
+| TLS | `rustls`（暗号プロバイダ: `aws-lc-rs` または `ring`、FIPS が必要なら `aws-lc-rs` の FIPS 構成）、`rustls-pki-types`、`webpki` | mTLS、カスタム verifier、TPM 委譲署名用 `Signer` / `CryptoProvider` | quinn が要求する版と揃える。プロバイダは §7 で決定【要確認】 |
 | 証明書処理 | `rcgen`（CA・CSR 生成）、`x509-parser`、`x509-cert`（RustCrypto） | 自己署名クラスタ CA、ノード証明書 | マイナー固定 |
 | 楕円曲線・ハッシュ | `p256`、`elliptic-curve`、`sha2`、`hkdf`、`aead` / `chacha20poly1305` / `aes-gcm`（RustCrypto） | P-256 群・スカラー演算、KDF（threshold-crypto.md） | RustCrypto の安定リリースを固定。pre-release 版は使わない |
-| HPKE | `hpke`（RFC 9180、DHKEM(P-256, HKDF-SHA256)） | 閾値 HPKE 復号、Transit blob | 【要確認】P-256 KEM のサポートと監査状況。不足時は `p256` 上で DHKEM を薄く自前実装（RFC 9180 のテストベクタで検証） |
-| 閾値暗号 | `vsss-rs`（Shamir / Feldman）【要確認】、GJKR New-DKG・VSR・Share Refresh は**自前実装**（`qorynth-threshold` クレートに分離） | 2-of-3 Share、Feldman VSS、DKG | 自前部分は外部暗号監査の対象。`vsss-rs` を使わず自前とする判断もスパイクで行う |
-| FROST（将来） | `frost-p256`、`frost-ed25519`（ZcashFoundation） | 将来の署名用別鍵（threshold-crypto.md §0） | 採用時に版を固定。【要確認】RFC 9591 準拠状況 |
+| HPKE | `hpke`（RFC 9180、DHKEM(P-256, HKDF-SHA256)） | 閾値 HPKE 復号、Transit blob | DHKEM(P-256, HKDF-SHA256) は実装済み（feature `nistp`）。マイナー固定、MSRV 制約をツールチェーンに反映。監査状況は【要確認】。必要時の備えとして `p256` 上で DHKEM を薄く自前実装する方針は維持（RFC 9180 のテストベクタで検証） |
+| 閾値暗号 | `vsss-rs`（Shamir / Feldman、活発に保守）、GJKR New-DKG・VSR・Share Refresh は**自前実装**（`qorynth-threshold` クレートに分離） | 2-of-3 Share、Feldman VSS、DKG | 自前部分は外部暗号監査の対象。`vsss-rs` を使わず自前とする判断もスパイクで行う |
+| FROST（将来） | `frost-p256`、`frost-ed25519`（ZcashFoundation） | 将来の署名用別鍵（threshold-crypto.md §0） | RFC 9591 対応・非 yanked 確認済み。採用時にマイナー固定 |
 | 秘密値の扱い | `zeroize`、`secrecy`、`subtle`、`memsec`（または `region`）、`libc`（`mlock`/`prctl(PR_SET_DUMPABLE)`） | ゼロ化、定数時間比較、メモリロック（T6） | マイナー固定 |
-| TPM | `tss-esapi`（`libtss2` に依存）。`/dev/tpmrm0` を使用。代替: `cryptoki` + `tpm2-pkcs11` | 非エクスポート鍵、TLS 署名委譲（T4）、ノード ID | 【要確認】版、`libtss2` のバージョン固定と静的リンク可否。署名ラッパは自作の `qorynth-tpm` クレートに隔離 |
-| Raft | `openraft` | メンバーシップ・クラスタ状態（T7） | マイナー固定。API 変動が大きい【要確認】。ストレージは自前（`redb` または `rocksdb`） |
+| TPM | `tss-esapi`（tpm2-tss は同梱ビルド可能）。`/dev/tpmrm0` を使用。代替: `cryptoki` + `tpm2-pkcs11` | 非エクスポート鍵、TLS 署名委譲（T4）、ノード ID | マイナー固定。`bundled` + `generate-bindings` feature で同梱ビルド可能（要検証）。tpm2-tss のソースも固定し、署名ラッパは自作の `qorynth-tpm` クレートに隔離 |
+| Raft | `openraft` | メンバーシップ・クラスタ状態（T7） | 活発に保守。API 変動に備えマイナー固定。ストレージは自前（`redb` または `rocksdb`） |
 | 永続化 | `redb`（純 Rust の組込み KV）または `rocksdb`、`serde` + `postcard`/`bincode`/`ciborium`（CBOR）、`ed25519-dalek` / `p256::ecdsa`（署名レコード） | last-known-good アドレス、`seq`、Signal ウォームキャッシュ、署名つき LWW レコード | 暗号化永続化が必要なものは TPM シール鍵で保護 |
-| HTTP / OpenBao 連携 | `axum`（+ `hyper`、`tower`）、`serde` / `serde_json`、`reqwest`（`rustls-tls`、クライアント用） | Transit Seal 互換 API（`qorynth-seal`）、ヘルスチェック、OpenBao API クライアント | `axum` は 0.x のためマイナー固定【要確認】。OpenBao は 2.x 系を §7 スパイクで固定 |
+| HTTP / OpenBao 連携 | `axum`（+ `hyper`、`tower`）、`serde` / `serde_json`、`reqwest`（`rustls-tls`、クライアント用） | Transit Seal 互換 API（`qorynth-seal`）、ヘルスチェック、OpenBao API クライアント | `axum` は活発に保守されており、マイナー固定。OpenBao の採用版は §7 スパイクで固定【要確認】 |
 | WebSocket / 承認口 | `axum` の WebSocket、`tokio-tungstenite` | Signal の承認端末向け口（HTTPS/WSS） | マイナー固定 |
-| WebAuthn | `webauthn-rs` | 端末登録・承認（T9） | 【要確認】Passkey 対応版を固定 |
-| CLI | `clap`（derive） | `qorynth` CLI | 4.x |
+| WebAuthn | `webauthn`（kanidm 製、GitHub リポジトリ名: `webauthn-rs`） | 端末登録・承認（T9） | Passkey 対応・更新継続・非 yanked 確認済み。マイナー固定 |
+| CLI | `clap`（derive） | `qorynth` CLI | 最新 stable を基本に固定 |
 | ログ・監視 | `tracing`、`tracing-subscriber`、`opentelemetry` + `metrics-exporter-prometheus` | 構造化ログ、メトリクス、監査ログ | 秘密値を出さないフィールド制限をレビュー項目にする |
 | エラー・設定 | `thiserror`、`anyhow`（バイナリ層のみ）、`figment` または `config` | 全体 | — |
-| K8s / デプロイ | コンテナビルド: `cargo-chef` + multi-stage、ベースは distroless/cc 系（`libtss2` 同梱のため）。マニフェストは ArgoCD GitOps（既存方針）。K8s API 直接操作は原則不要、必要なら `kube` | デプロイ（T10） | `qorynth-signal`・`qorynth-seal` は静的 musl ビルドを目標、`qorynth-node` は `libtss2` 次第【要確認】 |
+| K8s / デプロイ | コンテナビルド: `cargo-chef` + multi-stage、ベースは同梱ビルドの検証結果に応じて scratch / distroless 系を選択。マニフェストは ArgoCD GitOps（既存方針）。K8s API 直接操作は原則不要、必要なら `kube` | デプロイ（T10） | `qorynth-signal`・`qorynth-seal` は静的 musl ビルドを目標、`qorynth-node` は `bundled` feature で同梱ビルド可能（要検証） |
 | 単体・プロパティテスト | `cargo test` + `cargo-nextest`、`proptest`、`rstest`、`insta`（スナップショット） | 閾値条件・状態遷移・RFC テストベクタ | — |
 | ファジング | `cargo-fuzz`（libFuzzer）、`honggfuzz` | メッセージパーサ、HPKE blob、Transit API | CI で短時間、夜間で長時間 |
 | ネットワーク障害注入 | `turmoil`、`tokio::time::pause`、`tc`/`toxiproxy`（E2E） | 分断・遅延・再起動シナリオ（T11） | — |
@@ -182,7 +182,7 @@ QUIC・TPM・メモリ消去の 3 要件（T1・T4・T6）が同時に弱く、�
 
 ### 6.1 クレート構成（案）
 
-`qorynth-threshold`（DKG / VSS / HPKE 復号の純粋ロジック。ネットワーク・OS 依存なし）、`qorynth-tpm`（TPM と `SigningKey`）、`qorynth-transport`（quinn + rustls、verifier、hole punching）、`qorynth-node` / `qorynth-seal` / `qorynth-signal` / `qorynth-approval`（バイナリ）、`qorynth-cli`。秘密値を扱うコード境界と `unsafe` を数クレートに閉じ込め、監査範囲を限定する。
+`qorynth-threshold`（DKG / VSS / HPKE 復号の純粋ロジック。ネットワーク・OS 依存なし）、`qorynth-tpm`（TPM と `Signer`）、`qorynth-transport`（quinn + rustls、verifier、hole punching）、`qorynth-node` / `qorynth-seal` / `qorynth-signal` / `qorynth-approval`（バイナリ）、`qorynth-cli`。秘密値を扱うコード境界と `unsafe` を数クレートに閉じ込め、監査範囲を限定する。
 
 ---
 
@@ -191,10 +191,10 @@ QUIC・TPM・メモリ消去の 3 要件（T1・T4・T6）が同時に弱く、�
 | # | リスク | 影響 | 対処 |
 |---|---|---|---|
 | R1 | **学習コスト・チーム知見不足**（Rust 経験者の不在【要確認】） | 開発速度低下、レビュー品質低下 | フェーズ1を小さな実装（QUIC + mTLS のハンドシェイク）で始め、習熟期間を確保。`clippy` を厳格化。暗号境界以外は単純なスタイル（過度なジェネリクス・マクロ禁止）に統一。必要なら外部レビュー |
-| R2 | **tss-esapi が C ライブラリ依存**（ビルド・配布・静的リンクが複雑） | `qorynth-node` の配布複雑化 | フェーズ1冒頭スパイクで `swtpm` 上の署名を検証。静的リンク不可なら distroless/cc ベースで動的リンク。最悪の代替: `cryptoki` + `tpm2-pkcs11`、さらに最悪は TPM 処理のみ別プロセス（Go/C）に分離して Unix ソケット経由で署名 |
-| R3 | **rustls で TPM 署名が成立しない**（`SigningKey` が同期 API 前提で TPM の遅延を吸収できない等） | ハンドシェイク性能・設計 | スパイクで TPM 署名の遅延（数十〜数百 ms 想定【要確認】）を測定。長寿命接続・再接続頻度が低い前提（p2p-transport.md）なので許容見込み。ブロッキング呼び出しは専用スレッドプールへ。接続再確立の集中時はセッション再開（0-RTT は不使用のため通常再開のみ）を検討 |
-| R4 | **quinn で hole punching 用ソケット制御が不十分**（API 変動・UDP ソケット共有） | フェーズ1の NAT 越え | スパイクで `AsyncUdpSocket` 差替えの実現性確認。不足なら `quiche`（Sans-IO）または `s2n-quic` に切替。iroh の実装を設計参考にする（依存はしない） |
-| R5 | **openraft の API 変動・成熟度**【要確認】 | メンバーシップ層の保守コスト | マイナー固定、薄いラッパ（`qorynth-consensus`）で隔離。ステートマシンは小さく保つ（メンバーシップ・状態のみ）。成熟度が不足なら `raft-rs` へ、または Go の `hashicorp/raft` を別プロセスに切り出す案を比較 |
+| R2 | **tss-esapi の同梱ビルド・配布検証**（`bundled` feature で同梱ビルド可能、要検証） | `qorynth-node` の対象環境でのビルド・配布調整 | システムの `libtss2` への依存は必須でない。`bundled` + `generate-bindings` feature による tpm2-tss の静的リンク機構は確認済み。フェーズ1冒頭スパイクで対象環境のビルド・配布と `swtpm` 上の署名を検証。必要なら distroless/cc ベースで動的リンク。最悪の代替: `cryptoki` + `tpm2-pkcs11`、さらに最悪は TPM 処理のみ別プロセス（Go/C）に分離して Unix ソケット経由で署名 |
+| R3 | **TPM 委譲署名の遅延と rustls 統合**（`Signer` トレイトが存在し、`CryptoProvider` と合わせた差し込み口は確認済み） | ハンドシェイク性能・設計 | 同期 API の `Signer` に TPM 署名を委譲し、スパイクで TPM 署名の遅延（数十〜数百 ms 想定【要確認】）を測定。長寿命接続・再接続頻度が低い前提（p2p-transport.md）なので許容見込み。ブロッキング呼び出しは専用スレッドプールへ。接続再確立の集中時はセッション再開（0-RTT は不使用のため通常再開のみ）を検討 |
+| R4 | **hole punching 用ソケット共有の自前実装・統合**（`AsyncUdpSocket` / `Transmit` の公開とカスタムソケットの差し込み口は確認済み） | フェーズ1の NAT 越え | スパイクで `AsyncUdpSocket` を差し替え、hole punching と QUIC のソケット共有の動作を確認。不足なら `quiche`（Sans-IO）または `s2n-quic` に切替。iroh の実装を設計参考にする（依存はしない） |
+| R5 | **openraft の API 変動と要件適合性**（活発に保守されていることは確認済み） | メンバーシップ層の保守コスト | マイナー固定、薄いラッパ（`qorynth-consensus`）で隔離。ステートマシンは小さく保つ（メンバーシップ・状態のみ）。目標の障害シナリオに適合しない場合は `raft-rs` へ、または Go の `hashicorp/raft` を別プロセスに切り出す案を比較 |
 | R6 | **GJKR・VSR などの自前暗号プロトコル**（Rust でも既製がない） | 暗号的な脆弱性 | `qorynth-threshold` に隔離、RFC/論文のテストベクタ、`proptest`、独立した外部暗号レビュー。MVP では threshold-crypto.md §2.6 のフォールバック（OpenBao 標準 Shamir）で実運用検証に先行 |
 | R7 | **メモリ消去の過信**（`zeroize` が効かないコピー：async の状態機械・`Vec` の再確保・スタックスピル） | Share のコピー残存 | 秘密値は固定長・`Box` 化・`Zeroizing` ラッパ、`async` を跨いで保持しない設計。`mlock`・core dump 抑止・スワップ無効化を運用要件化。コピー有無をテスト（デバッグビルドでメモリスキャン）で確認 |
 | R8 | **依存クレートのサプライチェーン**（暗号・QUIC クレートの更新・乗っ取り） | 全体 | §6 の方針（ロックファイル・`cargo-vet`・`cargo-deny`・マイナー固定）。依存を最小化、ベンダリング（`cargo vendor`）の検討 |
@@ -208,15 +208,15 @@ QUIC・TPM・メモリ消去の 3 要件（T1・T4・T6）が同時に弱く、�
 
 1. **フェーズ1冒頭スパイク（言語決定の最終確認）。** 以下を検証し、成功を「言語決定の確定条件」とする。覆る場合は §5.2 の条件に従い Go に切替える。
    - quinn + rustls で、クラスタ CA + メンバーシップ照合の verifier を実装し、3 ノード mTLS が成立すること。0-RTT が無効であること。
-   - `swtpm` 上で `tss-esapi` により非エクスポート鍵を作成し、`rustls::sign::SigningKey` 経由でハンドシェイク署名できること（遅延測定を含む）。
-   - quinn で `AsyncUdpSocket` 差替え（または同等の機構）により hole punching 用ソケット共有ができること。
-   - `hpke` クレートが DHKEM(P-256) を持つこと、`vsss-rs` が Feldman VSS を必要な形で提供すること（なければ自前方針）。
+   - `swtpm` 上で `tss-esapi` により非エクスポート鍵を作成し、`rustls::sign::Signer` 経由でハンドシェイク署名できること（遅延測定を含む）。`bundled` + `generate-bindings` feature による同梱ビルド・静的リンクと対象環境への配布が成立すること。
+   - 公開確認済みの `AsyncUdpSocket` / `Transmit` を使い、quinn と hole punching 用ソケット共有の自前実装が動作すること。
+   - `hpke` の実装済み DHKEM(P-256, HKDF-SHA256) を feature `nistp` で有効化し、MSRV と RFC テストベクタへの適合を検証すること。`vsss-rs` が Shamir / Feldman VSS を必要な形で提供すること（なければ自前方針）。
    - `openraft` が目標の障害シナリオ（1 台停止・再起動）で安定動作すること。
 2. **チームの Rust 経験・体制の確認**【要確認】。経験者がいない場合の学習計画・外部レビュー体制。
-3. **ライブラリの最新版・メンテナンス状況・FIPS 要否**。本書の【要確認】項目を Web で裏取りし、版を固定する（執筆時は Web 検索が使えなかった）。
-4. **暗号プロバイダ（`aws-lc-rs` vs `ring`）の選択**、FIPS 要件の有無。
-5. **TPM 実機の要件**: ノード配置先（物理 TPM / vTPM / クラウド）と `/dev/tpmrm0` へのアクセス（K8s での device plugin・権限）。
-6. **承認端末向けフロントエンドとバックエンドの言語境界**。`qorynth-approval` の WebAuthn 検証は Rust（webauthn-rs）で Signal に組込む前提だが、Kotlin/TypeScript 側で扱う場合のインターフェース。
+3. **ライブラリの Web 裏取り: 完了（2026-11-17）**。crates.io API と docs.rs による今回の確認対象の存在・維持状況・主要 API の確認結果を本書に反映済み。対象外の Go / Kotlin・iroh と、監査状況など未解消の【要確認】は残す。採用時の依存固定と実環境検証はフェーズ1で行う。
+4. **暗号プロバイダ（`aws-lc-rs` vs `ring`）の選択**、FIPS 要件の有無【要確認】。
+5. **TPM 実機の要件**: ノード配置先（物理 TPM / vTPM / クラウド）と `/dev/tpmrm0` へのアクセス（K8s での device plugin・権限）【要確認】。
+6. **承認端末向けフロントエンドとバックエンドの言語境界**。`qorynth-approval` の WebAuthn 検証は Rust（`webauthn`）で Signal に組込む前提だが、Kotlin/TypeScript 側で扱う場合のインターフェース【要確認】。
 7. **Kotlin 資産（Keruta 等）との連携方法**。必要になった場合は HTTP/gRPC の API 境界に限定し、データ経路には入れない。
 8. **Cloudflare エコシステムの利用範囲**。architecture.md §5 は Go の長所として挙げているが、鍵管理ノード本体で Cloudflare Workers を使う予定はない（データ経路・TPM 要件と相容れない）。承認端末向け静的配信等の周辺用途のみで検討。
 9. **監査・外部レビュー**: 自前暗号（GJKR・VSR・HPKE 薄実装）の監査時期と、Rust 側のレビュー可能な審査員の確保。
